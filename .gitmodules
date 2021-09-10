@@ -1,0 +1,3 @@
+[submodule ".abu/build-utils"]
+	path = .abu/build-utils
+	url = https://github.com/abu-lib/build-utils.git
