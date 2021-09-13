@@ -12,20 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 #ifndef ABU_FEED_STREAM_H
 #define ABU_FEED_STREAM_H
 
-#include <memory>
+#include <optional>
 #include <ranges>
 
 #include "abu/feed/debug.h"
 #include "abu/feed/tags.h"
+#include "abu/mem.h"
 
 namespace abu::feed {
 
 template <typename T>
-concept Chunk = std::ranges::forward_range<T> && std::default_initializable<T>;
+concept Chunk = std::ranges::forward_range<T>;
 
 template <Chunk ChunkT>
 class stream;
@@ -33,12 +33,47 @@ class stream;
 namespace details_ {
 template <Chunk ChunkT>
 struct stream_node {
-  stream_node() = default;
-  stream_node(ChunkT&& in_data) : data(std::move(in_data)) {}
+  static_assert(std::is_const_v<ChunkT>);
 
-  ChunkT data;
-  std::shared_ptr<stream_node<const ChunkT>> next;
-  bool is_final_chunk = false;
+  stream_node() = default;
+  stream_node(ChunkT&& in_data) : data_(std::move(in_data)) {}
+
+  std::ranges::iterator_t<ChunkT> begin() const {
+    if (data_) {
+      return std::ranges::begin(*data_);
+    }
+    return {};
+  }
+
+  std::ranges::sentinel_t<ChunkT> end() const {
+    if (data_) {
+      return std::ranges::end(*data_);
+    }
+    return {};
+  }
+
+  void mark_final() {
+    assume(!next_ && !is_final_);
+    is_final_ = true;
+  }
+
+  bool is_final() const {
+    return is_final_;
+  }
+
+  void set_next(mem::ref_count_ptr<stream_node<ChunkT>> next) {
+    assume(!next_ && !is_final_);
+    next_ = next;
+  }
+
+  const mem::ref_count_ptr<stream_node<ChunkT>>& next() const {
+    return next_;
+  }
+
+ private:
+  mem::ref_count_ptr<stream_node<ChunkT>> next_;
+  bool is_final_ = false;
+  std::optional<ChunkT> data_;
 };
 
 template <Chunk ChunkT>
@@ -47,16 +82,19 @@ struct stream_checkpoint {
   friend class stream<ChunkT>;
 
   stream_checkpoint(std::ranges::iterator_t<const ChunkT> pos,
-                    std::shared_ptr<stream_node<const ChunkT>> chunk)
+                    mem::ref_count_ptr<stream_node<const ChunkT>> chunk)
       : position_(std::move(pos)), current_chunk_(std::move(chunk)) {}
 
   std::ranges::iterator_t<const ChunkT> position_;
-  std::shared_ptr<stream_node<const ChunkT>> current_chunk_;
+  mem::ref_count_ptr<stream_node<const ChunkT>> current_chunk_;
 };
 }  // namespace details_
 
 template <Chunk ChunkT>
 class stream {
+  static constexpr const char* moved_err_msg =
+      "Using stream feed that was moved";
+
  public:
   using chunk_type = const ChunkT;
   using node_type = details_::stream_node<chunk_type>;
@@ -66,74 +104,117 @@ class stream {
   using difference_type = std::ptrdiff_t;
   using value_type = std::ranges::range_value_t<ChunkT>;
 
-  constexpr stream()
-      : current_chunk_(std::make_shared<node_type>()),
-        position_(std::ranges::begin(current_chunk_->data)),
-        chunk_end_(std::ranges::end(current_chunk_->data)),
-        tail_(current_chunk_) {}
+  stream() {
+    start_chunk_(mem::make_ref_counted<node_type>());
+    tail_ = current_chunk_;
+  }
 
-  constexpr decltype(auto) operator*() const {
-    if (position_ == chunk_end_) {
-      assume(!!current_chunk_->next);
-      current_chunk_ = current_chunk_->next;
-      position_ = std::ranges::begin(current_chunk_->data);
-      chunk_end_ = std::ranges::end(current_chunk_->data);
-    }
+  stream(stream&&) = default;
+  stream(const stream&) = delete;
+
+  stream& operator=(stream&&) = default;
+  stream& operator=(const stream&) = delete;
+
+  decltype(auto) operator*() const {
+    precondition(!is_moved_(), moved_err_msg);
+    precondition(position_ != chunk_end_);
+
     return *position_;
   }
 
-  constexpr stream& operator++() {
+  stream& operator++() {
+    precondition(!is_moved_(), moved_err_msg);
+    precondition(position_ != chunk_end_ || !current_chunk_->is_final());
+
     ++position_;
-    if (position_ == chunk_end_ && current_chunk_->next) {
-      current_chunk_ = current_chunk_->next;
-      position_ = std::ranges::begin(current_chunk_->data);
-      chunk_end_ = std::ranges::end(current_chunk_->data);
+    if (position_ == chunk_end_ && !at_last_chunk_()) {
+      start_chunk_(current_chunk_->next());
     }
     return *this;
   }
 
-  constexpr void operator++(int) {
+  void operator++(int) {
+    precondition(!is_moved_(), moved_err_msg);
     ++(*this);
   }
 
-  constexpr bool operator==(const empty_feed_t&) const {
-    return position_ == chunk_end_ && !current_chunk_->next;
+  bool operator==(const empty_feed_t&) const {
+    precondition(!is_moved_(), moved_err_msg);
+    return position_ == chunk_end_ && at_last_chunk_();
   }
 
-  constexpr bool operator==(const end_of_feed_t&) const {
-    return position_ == chunk_end_ && current_chunk_->is_final_chunk;
+  bool operator==(const end_of_feed_t&) const {
+    precondition(!is_moved_(), moved_err_msg);
+    return position_ == chunk_end_ && current_chunk_->is_final();
   }
 
   void append(chunk_type&& chunk) {
-    auto new_node =
-        std::make_shared<details_::stream_node<chunk_type>>(std::move(chunk));
-    tail_->next = new_node;
+    precondition(!is_moved_(), moved_err_msg);
+    precondition(!tail_->is_final());
+
+    if (std::ranges::empty(chunk)) {
+      return;
+    }
+
+    auto new_node = mem::make_ref_counted<details_::stream_node<chunk_type>>(
+        std::move(chunk));
+
+    if (*this == empty) {
+      start_chunk_(new_node);
+    }
+
+    tail_->set_next(new_node);
     tail_ = std::move(new_node);
   }
 
   void finish() {
-    tail_->is_final_chunk = true;
+    precondition(!is_moved_(), moved_err_msg);
+    precondition(!tail_->is_final());
+
+    tail_->mark_final();
   }
 
-  constexpr checkpoint_type checkpoint() {
+  checkpoint_type checkpoint() {
+    precondition(!is_moved_(), moved_err_msg);
     return checkpoint_type{position_, current_chunk_};
   }
 
-  constexpr void rollback(checkpoint_type cp) {
+  void rollback(checkpoint_type cp) {
+    precondition(!is_moved_(), moved_err_msg);
+
     position_ = std::move(cp.position_);
     current_chunk_ = std::move(cp.current_chunk_);
-    chunk_end_ = std::ranges::end(current_chunk_->data);
+    chunk_end_ = current_chunk_->end();
+
+    // This can happen when checkpointing at the end of an empty stream.
+    if (position_ == chunk_end_ && !at_last_chunk_()) {
+      start_chunk_(current_chunk_->next());
+    }
   }
 
  private:
-  using chunk_iterator_type = std::ranges::iterator_t<const ChunkT>;
-  using sentinel_type = std::ranges::sentinel_t<const ChunkT>;
+  bool is_moved_() const {
+    return tail_ == nullptr;
+  }
 
-  mutable std::shared_ptr<node_type> current_chunk_;
-  mutable chunk_iterator_type position_;
-  mutable sentinel_type chunk_end_;
+  bool at_last_chunk_() const {
+    return current_chunk_ == tail_;
+  }
 
-  std::shared_ptr<node_type> tail_;
+  void start_chunk_(mem::ref_count_ptr<node_type> chunk) {
+    position_ = chunk->begin();
+    chunk_end_ = chunk->end();
+    current_chunk_ = std::move(chunk);
+  }
+
+  using chunk_iterator_type = std::ranges::iterator_t<node_type>;
+  using sentinel_type = std::ranges::sentinel_t<node_type>;
+
+  mem::ref_count_ptr<node_type> current_chunk_;
+  chunk_iterator_type position_;
+  sentinel_type chunk_end_;
+
+  mem::ref_count_ptr<node_type> tail_;
 };
 
 }  // namespace abu::feed

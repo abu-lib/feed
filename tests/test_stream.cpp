@@ -13,10 +13,19 @@
 // limitations under the License.
 
 #include <array>
+#include <numeric>
 #include <vector>
 
 #include "abu/feed.h"
 #include "gtest/gtest.h"
+
+namespace {
+auto feed_read(abu::Feed auto& f) {
+  auto result = *f;
+  ++f;
+  return result;
+}
+}  // namespace
 
 TEST(single_chunk_stream, basic_api_test) {
   abu::feed::stream<std::vector<int>> sut;
@@ -27,18 +36,14 @@ TEST(single_chunk_stream, basic_api_test) {
   sut.finish();
 
   EXPECT_NE(sut, abu::feed::empty);
-  EXPECT_EQ(*sut, 1);
+  EXPECT_NE(sut, abu::feed::end_of_feed);
 
-  EXPECT_NE(sut, abu::feed::empty);
-  EXPECT_EQ(*++sut, 2);
+  EXPECT_EQ(feed_read(sut), 1);
+  EXPECT_EQ(feed_read(sut), 2);
+  EXPECT_EQ(feed_read(sut), 3);
+  EXPECT_EQ(feed_read(sut), 4);
 
-  EXPECT_NE(sut, abu::feed::empty);
-  EXPECT_EQ(*++sut, 3);
-
-  EXPECT_NE(sut, abu::feed::empty);
-  EXPECT_EQ(*++sut, 4);
-
-  EXPECT_EQ(++sut, abu::feed::empty);
+  EXPECT_EQ(sut, abu::feed::empty);
   EXPECT_EQ(sut, abu::feed::end_of_feed);
 }
 
@@ -49,31 +54,29 @@ TEST(single_chunk_stream, rollback) {
 
   auto cp = sut.checkpoint();
 
-  EXPECT_EQ(*sut, 1);
-  EXPECT_EQ(*++sut, 2);
+  EXPECT_EQ(feed_read(sut), 1);
+  EXPECT_EQ(feed_read(sut), 2);
   {
     auto cp2 = sut.checkpoint();
-    EXPECT_EQ(*++sut, 3);
+    EXPECT_EQ(feed_read(sut), 3);
     sut.rollback(cp2);
-    EXPECT_EQ(*++sut, 3);
+    EXPECT_EQ(feed_read(sut), 3);
     sut.rollback(cp2);
-    EXPECT_EQ(*++sut, 3);
-    sut.rollback(cp2);
-    EXPECT_EQ(*++sut, 3);
+    EXPECT_EQ(feed_read(sut), 3);
   }
 
   sut.rollback(cp);
 
-  EXPECT_EQ(*sut, 1);
-  EXPECT_EQ(*++sut, 2);
-  EXPECT_EQ(*++sut, 3);
-  EXPECT_EQ(*++sut, 4);
+  EXPECT_EQ(feed_read(sut), 1);
+  EXPECT_EQ(feed_read(sut), 2);
+  EXPECT_EQ(feed_read(sut), 3);
+  EXPECT_EQ(feed_read(sut), 4);
 
-  EXPECT_EQ(++sut, abu::feed::empty);
+  EXPECT_EQ(sut, abu::feed::empty);
   EXPECT_EQ(sut, abu::feed::end_of_feed);
 }
 
-TEST(multi_chunks_stream, basic_api_test) {
+TEST(stream, pre_filled) {
   abu::feed::stream<std::vector<int>> sut;
   EXPECT_EQ(sut, abu::feed::empty);
   EXPECT_NE(sut, abu::feed::end_of_feed);
@@ -82,113 +85,85 @@ TEST(multi_chunks_stream, basic_api_test) {
   sut.append({3, 4});
   sut.finish();
 
-  EXPECT_NE(sut, abu::feed::empty);
-  EXPECT_EQ(*sut, 1);
+  EXPECT_EQ(feed_read(sut), 1);
+  EXPECT_EQ(feed_read(sut), 2);
+  EXPECT_EQ(feed_read(sut), 3);
+  EXPECT_EQ(feed_read(sut), 4);
 
-  EXPECT_NE(sut, abu::feed::empty);
-  EXPECT_EQ(*++sut, 2);
-
-  EXPECT_NE(sut, abu::feed::empty);
-  EXPECT_EQ(*++sut, 3);
-
-  EXPECT_NE(sut, abu::feed::empty);
-  EXPECT_EQ(*++sut, 4);
-
-  EXPECT_EQ(++sut, abu::feed::empty);
+  EXPECT_EQ(sut, abu::feed::empty);
   EXPECT_EQ(sut, abu::feed::end_of_feed);
 }
 
-TEST(multi_chunks_stream, rollback) {
-  abu::feed::stream<std::vector<int>> sut;
-  sut.append({1, 2});
-  sut.append({3, 4});
-  sut.finish();
-
-  auto cp = sut.checkpoint();
-
-  EXPECT_EQ(*sut, 1);
-  EXPECT_EQ(*++sut, 2);
-  {
-    auto cp2 = sut.checkpoint();
-    EXPECT_EQ(*++sut, 3);
-    sut.rollback(cp2);
-    EXPECT_EQ(*++sut, 3);
-    sut.rollback(cp2);
-    EXPECT_EQ(*++sut, 3);
-    sut.rollback(cp2);
-    EXPECT_EQ(*++sut, 3);
-  }
-
-  sut.rollback(cp);
-
-  EXPECT_EQ(*sut, 1);
-  EXPECT_EQ(*++sut, 2);
-  EXPECT_EQ(*++sut, 3);
-  EXPECT_EQ(*++sut, 4);
-
-  EXPECT_EQ(++sut, abu::feed::empty);
-  EXPECT_EQ(sut, abu::feed::end_of_feed);
-}
-
-TEST(streaming_chunks_stream, basic_api_test) {
+TEST(stream, empty_chunks) {
   abu::feed::stream<std::vector<int>> sut;
   EXPECT_EQ(sut, abu::feed::empty);
   EXPECT_NE(sut, abu::feed::end_of_feed);
 
   sut.append({1, 2});
+  sut.append({});
+  sut.append({3, 4});
+  sut.finish();
 
-  EXPECT_NE(sut, abu::feed::empty);
-  EXPECT_EQ(*sut, 1);
+  EXPECT_EQ(feed_read(sut), 1);
+  EXPECT_EQ(feed_read(sut), 2);
+  EXPECT_EQ(feed_read(sut), 3);
+  EXPECT_EQ(feed_read(sut), 4);
 
-  EXPECT_NE(sut, abu::feed::empty);
-  EXPECT_EQ(*++sut, 2);
+  EXPECT_EQ(sut, abu::feed::empty);
+  EXPECT_EQ(sut, abu::feed::end_of_feed);
+}
 
-  EXPECT_EQ(++sut, abu::feed::empty);
+TEST(stream, move_stream) {
+  abu::feed::stream<std::vector<int>> sut;
+  EXPECT_EQ(sut, abu::feed::empty);
   EXPECT_NE(sut, abu::feed::end_of_feed);
+
+  sut.append({1, 2});
+  sut.append({3, 4});
+  sut.finish();
+
+  EXPECT_EQ(feed_read(sut), 1);
+  EXPECT_EQ(feed_read(sut), 2);
+  EXPECT_EQ(feed_read(sut), 3);
+
+  auto cp = sut.checkpoint();
+  auto new_sut = std::move(sut);
+
+  EXPECT_DEATH(*sut, "moved");
+  EXPECT_DEATH(sut++, "moved");
+  EXPECT_DEATH(++sut, "moved");
+  EXPECT_DEATH((void)(sut == abu::feed::empty), "moved");
+  EXPECT_DEATH((void)(sut == abu::feed::end_of_feed), "moved");
+  EXPECT_DEATH(sut.append({}), "moved");
+  EXPECT_DEATH(sut.finish(), "moved");
+  EXPECT_DEATH(sut.checkpoint(), "moved");
+  EXPECT_DEATH(sut.rollback(cp), "moved");
+
+  EXPECT_EQ(feed_read(new_sut), 4);
+
+  EXPECT_EQ(new_sut, abu::feed::empty);
+  EXPECT_EQ(new_sut, abu::feed::end_of_feed);
+}
+
+TEST(stream, resume) {
+  abu::feed::stream<std::vector<int>> sut;
+  sut.append({1, 2});
+
+  EXPECT_EQ(feed_read(sut), 1);
+  EXPECT_EQ(feed_read(sut), 2);
+  EXPECT_EQ(sut, abu::feed::empty);
+  EXPECT_NE(sut, abu::feed::end_of_feed);
+
   sut.append({3, 4});
   EXPECT_NE(sut, abu::feed::empty);
   EXPECT_NE(sut, abu::feed::end_of_feed);
 
-  EXPECT_EQ(*sut, 3);
+  EXPECT_EQ(feed_read(sut), 3);
+  EXPECT_EQ(feed_read(sut), 4);
 
-  EXPECT_NE(sut, abu::feed::empty);
-  EXPECT_EQ(*++sut, 4);
-
-  EXPECT_EQ(++sut, abu::feed::empty);
+  EXPECT_EQ(sut, abu::feed::empty);
   EXPECT_NE(sut, abu::feed::end_of_feed);
 
   sut.finish();
-  EXPECT_EQ(sut, abu::feed::end_of_feed);
-}
-
-TEST(streaming_chunks_stream, rollback) {
-  abu::feed::stream<std::vector<int>> sut;
-  sut.append({1, 2});
-
-  auto cp = sut.checkpoint();
-
-  EXPECT_EQ(*sut, 1);
-  EXPECT_EQ(*++sut, 2);
-  {
-    auto cp2 = sut.checkpoint();
-    sut.append({3, 4});
-
-    EXPECT_EQ(*++sut, 3);
-    sut.rollback(cp2);
-    EXPECT_EQ(*++sut, 3);
-    sut.rollback(cp2);
-    EXPECT_EQ(*++sut, 3);
-    sut.rollback(cp2);
-    EXPECT_EQ(*++sut, 3);
-  }
-  sut.finish();
-  sut.rollback(cp);
-
-  EXPECT_EQ(*sut, 1);
-  EXPECT_EQ(*++sut, 2);
-  EXPECT_EQ(*++sut, 3);
-  EXPECT_EQ(*++sut, 4);
-
-  EXPECT_EQ(++sut, abu::feed::empty);
   EXPECT_EQ(sut, abu::feed::end_of_feed);
 }

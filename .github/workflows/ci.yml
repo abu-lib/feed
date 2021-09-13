@@ -3,35 +3,78 @@ name: CI
 on: push
 
 jobs:
+  coverage:
+    runs-on: ubuntu-20.04 
+    container: ghcr.io/abu-lib/smoke-test-env:1.0.0
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: |
+          pwd
+          ls -la
+          mkdir build 
+          cd build 
+          cmake -DCMAKE_BUILD_TYPE=Debug -DABU_COVERAGE=ON ..
+
+      - name: Build
+        working-directory: ${{github.workspace}}/build
+        run: |
+          cmake --build . --config Debug
+
+      - name: Test
+        working-directory: ${{github.workspace}}/build
+        run: |
+          ctest -C Debug --output-on-failure
+
+      - name: Create code coverage report
+        working-directory: ${{github.workspace}}/build
+        run: |
+          cmake --build . --config Debug --target abu_coverage_report
+
+      - name: Archive code coverage results
+        uses: actions/upload-artifact@v2
+        with:
+          name: code-coverage-report
+          path: build/abu_coverage_report
+          if-no-files-found: error
+
   build-and-test-ubuntu:
+    needs: coverage
+    runs-on: ubuntu-20.04 
+    container: ghcr.io/abu-lib/smoke-test-env:1.0.0
+
     strategy:
       matrix:
         compiler: [g++-11]
         build_type: [Debug, Release]
 
-    runs-on: ubuntu-20.04 
+    
     steps:
       - uses: actions/checkout@v2
         with:
           submodules: recursive
-      - name: Set up GCC
-        uses: egor-tensin/setup-gcc@v1
-        with:
-          version: 11
-          platform: x64
+
       - name: Configure
-        env:
-          CXX: ${{matrix.compiler}}
-        run: cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{matrix.build_type}}
+        run: |
+          mkdir build 
+          cd build 
+          cmake -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DABU_COVERAGE=ON ..
 
       - name: Build
-        run: cmake --build ${{github.workspace}}/build --config ${{matrix.build_type}}
+        working-directory: ${{github.workspace}}/build
+        run: |
+          cmake --build . --config ${{matrix.build_type}}
 
       - name: Test
         working-directory: ${{github.workspace}}/build
-        run: ctest -C ${{matrix.build_type}} --output-on-failure
-  
+        run: |
+          ctest -C ${{matrix.build_type}} --output-on-failure
+
   build-and-test-macos:
+    needs: coverage
     strategy:
       matrix:
         compiler: [g++-11]
@@ -55,6 +98,7 @@ jobs:
         run: ctest -C ${{matrix.build_type}} --output-on-failure
 
   build-and-test-windows:
+    needs: coverage
     strategy:
       matrix:
         toolset: [ClangCL, host=x64, host=x86]
